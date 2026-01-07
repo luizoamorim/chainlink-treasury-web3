@@ -1,0 +1,19 @@
+{
+  "editor.formatOnSave": true,
+  "[solidity]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "solidity.linter": "solhint",
+  "solidity.formatter": "prettier",
+  "solidity.packageDefaultDependenciesContractsDirectory": "src",
+  "solidity.packageDefaultDependenciesDirectory": "lib",
+  "solidity.remappings": [
+    "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/"
+  ],
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/lib": true
+  }
+}
