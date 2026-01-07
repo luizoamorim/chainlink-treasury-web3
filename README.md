@@ -4,6 +4,7 @@
 
 ![Stack](https://img.shields.io/badge/Stack-Solidity%20%7C%20Foundry-blue)
 ![Security](https://img.shields.io/badge/Security-Chainlink%20Oracle-375BD2)
+![Audit](https://img.shields.io/badge/Audit-Slither-green)
 
 ## 📖 Overview
 
@@ -18,7 +19,7 @@ The system is composed of two main contracts:
 1.  **`SimpleLending.sol`**: The core logic handler.
     * **Risk Engine:** Enforces a 50% Loan-to-Value (LTV) ratio.
     * **Oracle Integration:** Consumes the `ETH/USD` Chainlink Data Feed on Mainnet to calculate real-time collateral valuation.
-    * **Asset Management:** Handles custody of ETH collateral and issuance of USDC debt.
+    * **Solvency Checks:** Handles both borrowing limits and **solvency-aware withdrawals** (preventing users from withdrawing collateral if it exposes the protocol to bad debt).
 
 2.  **`MockUSDC.sol`**: An ERC-20 token used to simulate stablecoin liquidity seeding during tests.
 
@@ -58,49 +59,67 @@ sequenceDiagram
 * **Atomic Solvency Checks:** Every borrow action is atomically validated against the user's Health Factor. If the collateral value drops or debt increases beyond the LTV threshold, the transaction reverts instantly.
 * **Mainnet Fork Testing:** The test suite utilizes Foundry's fork capabilities to interact with the **live Chainlink Aggregator** on Ethereum Mainnet, ensuring the code works with real-world data, not just mocks.
 
-## 🛠️ Technical Deep Dive: The `borrowUsdc` Logic
+## 🛠️ Technical Deep Dive
 
-The critical function for treasury safety is `borrowUsdc`. It follows a strict **Checks-Effects-Interactions** pattern:
+### 1. The `borrowUsdc` Logic
+This function follows a strict **Checks-Effects-Interactions** pattern to prevent reentrancy:
+1.  **Valuation:** Fetches user's ETH balance * Chainlink Price.
+2.  **Validation:** `require(CurrentDebt + NewBorrow <= MaxBorrow)`.
+3.  **State Update:** Increases the user's debt balance in storage.
+4.  **Transfer:** Sends the requested USDC amount to the user.
 
-1.  **Valuation:** Fetches the user's ETH balance and multiplies it by the latest Chainlink price.
-    * *Math:* Normalized to 18 decimals to match solidity standards.
-2.  **Risk Calculation:** `MaxBorrow = (CollateralValue * LTV) / 100`.
-3.  **Validation:** `require(CurrentDebt + NewBorrow <= MaxBorrow)`.
-4.  **State Update:** Increases the user's debt balance in storage.
-5.  **Transfer:** Sends the requested USDC amount to the user.
+### 2. The `withdrawCollateral` Logic
+Withdrawals are the most critical point for protocol solvency. We cannot simply return funds; we must ensure the user remains healthy *after* the funds leave.
+1.  **Simulation:** Calculate `RemainingCollateral = CurrentCollateral - WithdrawAmount`.
+2.  **Hypothetical Check:** If `RemainingCollateral` is insufficient to cover existing `Debt`, the transaction reverts (`"Health Factor would be too low"`).
+3.  **Math Safety:** Uses `(Collateral * Price * LTV) / (1e8 * 100)` ordering to prevent precision loss.
 
-### 📊 Scenario Analysis: The Borrowing Logic
+## 📊 Scenario Analysis
 
-Let's simulate a real-world scenario to understand the solvency checks.
-
-**Assumptions:**
-* **ETH Price (Chainlink Feed):** $2,500 (`2500 * 10^8`)
-* **User Collateral:** 1 ETH (`1 * 10^18`)
-* **LTV (Risk Param):** 50%
-
-#### Step-by-Step Calculation
-1.  **Valuation:** The contract calculates the USD value of the collateral.
-    * Math: `(1 ETH * $2,500) = $2,500`
-2.  **Borrow Capacity:** It applies the LTV.
-    * Math: `$2,500 * 50% = $1,250`
-    * *Result:* The user can borrow **up to 1,250 USDC**.
+**Assumptions:** ETH Price: $2,500 | User Collateral: 1 ETH | LTV: 50% (Max Borrow: $1,250).
 
 #### 🟢 Happy Path (Solvent)
-* **User Action:** Calls `borrowUsdc(1000 * 10^18)` (Borrowing $1,000).
-* **Check:** Is `$1,000 <= $1,250`? **YES**.
-* **Result:**
-    1.  User receives 1,000 USDC.
-    2.  User's internal debt becomes $1,000.
-    3.  Transaction succeeds.
+* **Action:** User borrows $1,000.
+* **Check:** `$1,000 <= $1,250`? **YES**.
+* **Result:** Transfer succeeds.
 
-#### 🔴 Unhappy Path (Insolvent / Revert)
-* **User Action:** Calls `borrowUsdc(1,300 * 10^18)` (Borrowing $1,300).
-* **Check:** Is `$1,300 <= $1,250`? **NO**.
-* **Result:**
-    * The transaction **REVERTS** immediately.
-    * Error Message: `"Health Factor too low! Add more collateral."`
-    * No gas is wasted on token transfers; the state remains unchanged.
-    
+#### 🔴 Unhappy Path (Insolvent)
+* **Action:** User borrows $1,300.
+* **Check:** `$1,300 <= $1,250`? **NO**.
+* **Result:** Transaction **REVERTS**. State remains unchanged.
+
+## 🛡️ Security & Static Analysis (Slither)
+
+This project uses **Slither** for static analysis to ensure code safety and gas optimization.
+
+### Installation & Usage
+```bash
+# Install via pipx (Recommended for Mac/Linux)
+pipx install slither-analyzer
+
+# Run analysis
+slither .
+```
+
+### 🔍 Audit Notes (False Positives & Design Choices)
+If running Slither, you may notice specific warnings. Here is how we mitigate them:
+
+1.  **Reentrancy (`borrowUsdc` / `withdrawCollateral`):**
+    * *Warning:* Events are emitted after external calls.
+    * *Defense:* The protocol strictly follows the **Checks-Effects-Interactions** pattern. Internal balances are updated *before* any external token transfer, rendering reentrancy attacks mathematically impossible.
+
+2.  **Timestamp Dependence (`block.timestamp`):**
+    * *Warning:* Dangerous usage of timestamp.
+    * *Defense:* Used intentionally to validate Chainlink Oracle data freshness. We reject prices older than 1 hour to prevent Stale Price attacks.
+
+3.  **Low-Level Calls:**
+    * *Warning:* Use of `.call` for ETH transfers.
+    * *Defense:* `.transfer` sends a fixed gas amount (2300), which breaks compatibility with smart contract wallets (like Gnosis Safe). We use `.call` with a success check, which is the modern Solidity standard.
+
+4.  **Naming Conventions (Foundry vs Slither):**
+    * *Conflict:* Slither suggests `mixedCase` for immutables.
+    * *Decision:* We adhere to the **Foundry Style Guide**, which enforces `SCREAMING_SNAKE_CASE` for `immutable` variables (`USDC_TOKEN`, `PRICE_FEED`).
+
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -110,7 +129,7 @@ Let's simulate a real-world scenario to understand the solvency checks.
 
 ```bash
 # Clone the repo
-git clone [https://github.com/YOUR_USERNAME/chainlink-treasury.git](https://github.com/YOUR_USERNAME/chainlink-treasury.git)
+git clone https://github.com/YOUR_USERNAME/chainlink-treasury.git
 cd chainlink-treasury
 
 # Install dependencies (OpenZeppelin & Chainlink)
@@ -123,14 +142,7 @@ To test the integration with the real Chainlink Oracle, we fork the Ethereum Mai
 
 ```bash
 # Replace with your Alchemy/Infura RPC URL
-forge test --fork-url [https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY](https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY) -vv
-```
-
-### Output Example
-```text
-[PASS] testBorrowWithCollateral() (gas: 145023)
-Logs:
-  Current ETH Price from Chainlink: 250000000000
+forge test --fork-url https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY -vv
 ```
 
 ## 📜 License
