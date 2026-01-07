@@ -69,6 +69,38 @@ The critical function for treasury safety is `borrowUsdc`. It follows a strict *
 4.  **State Update:** Increases the user's debt balance in storage.
 5.  **Transfer:** Sends the requested USDC amount to the user.
 
+### 📊 Scenario Analysis: The Borrowing Logic
+
+Let's simulate a real-world scenario to understand the solvency checks.
+
+**Assumptions:**
+* **ETH Price (Chainlink Feed):** $2,500 (`2500 * 10^8`)
+* **User Collateral:** 1 ETH (`1 * 10^18`)
+* **LTV (Risk Param):** 50%
+
+#### Step-by-Step Calculation
+1.  **Valuation:** The contract calculates the USD value of the collateral.
+    * Math: `(1 ETH * $2,500) = $2,500`
+2.  **Borrow Capacity:** It applies the LTV.
+    * Math: `$2,500 * 50% = $1,250`
+    * *Result:* The user can borrow **up to 1,250 USDC**.
+
+#### 🟢 Happy Path (Solvent)
+* **User Action:** Calls `borrowUsdc(1000 * 10^18)` (Borrowing $1,000).
+* **Check:** Is `$1,000 <= $1,250`? **YES**.
+* **Result:**
+    1.  User receives 1,000 USDC.
+    2.  User's internal debt becomes $1,000.
+    3.  Transaction succeeds.
+
+#### 🔴 Unhappy Path (Insolvent / Revert)
+* **User Action:** Calls `borrowUsdc(1,300 * 10^18)` (Borrowing $1,300).
+* **Check:** Is `$1,300 <= $1,250`? **NO**.
+* **Result:**
+    * The transaction **REVERTS** immediately.
+    * Error Message: `"Health Factor too low! Add more collateral."`
+    * No gas is wasted on token transfers; the state remains unchanged.
+    
 ## 🚀 Getting Started
 
 ### Prerequisites
